@@ -1,3 +1,5 @@
+#!/usr/bin/python2
+
 """
 What:		/proc/diskstats
 Date:		February 2008
