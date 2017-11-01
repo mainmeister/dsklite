@@ -44,53 +44,26 @@ Keyboard:
 LED handling under Linux
 ========================
 
-In its simplest form, the LED class just allows control of LEDs from
-userspace. LEDs appear in /sys/class/leds/. The maximum brightness of the
-LED is defined in max_brightness file. The brightness file will set the brightness
-of the LED (taking a value 0-max_brightness). Most LEDs don't have hardware
-brightness support so will just be turned on for non-zero brightness settings.
-
-The class also introduces the optional concept of an LED trigger. A trigger
-is a kernel based source of led events. Triggers can either be simple or
-complex. A simple trigger isn't configurable and is designed to slot into
-existing subsystems with minimal additional code. Examples are the disk-activity,
-nand-disk and sharpsl-charge triggers. With led triggers disabled, the code
-optimises away.
-
-Complex triggers whilst available to all LEDs have LED specific
-parameters and work on a per LED basis. The timer trigger is an example.
-The timer trigger will periodically change the LED brightness between
-LED_OFF and the current brightness setting. The "on" and "off" time can
-be specified via /sys/class/leds/<device>/delay_{on,off} in milliseconds.
-You can change the brightness value of a LED independently of the timer
-trigger. However, if you set the brightness value to LED_OFF it will
-also disable the timer trigger.
-
-You can change triggers in a similar manner to the way an IO scheduler
-is chosen (via /sys/class/leds/<device>/trigger). Trigger specific
-parameters can appear in /sys/class/leds/<device> once a given trigger is
-selected.
-
-write to /sys/devices/platform/i8042/serio0/input/input3/input3::numlock/brightness
-0 = off
-1 = on
-NOTE: MUST be root
+Uses the keyboardleds library
+    https://python-keyboardleds.readthedocs.io/en/0.3.3/index.html
 """
 
 import threading
 import time
+import keyboardleds
+import glob
 
 STATSFILE = '/proc/diskstats'
-LEDFILE = '/sys/devices/platform/i8042/serio0/input/input3/input3::numlock/brightness'
 BLINKRATE = 0.065
 DEVICENAME = 2
 IOINPROGRESS = 11
-LEDON = '1'
-LEDOFF = '0'
-DEVICE = "sda"
+DEVICE = "mmcblk0"
+
+event_device = glob.glob('/dev/input/by-path/*-event-kbd')[0]
+ledkit = keyboardleds.LedKit(event_device)
 
 def resetled():
-    open(LEDFILE, 'a').write(LEDOFF)
+    ledkit.caps_lock.reset()
 
 def setled():
     global timer
@@ -99,7 +72,7 @@ def setled():
             timer.cancel()
     timer = threading.Timer(BLINKRATE, resetled)
     timer.start()
-    open(LEDFILE, 'a').write(LEDON)
+    ledkit.caps_lock.set()
 
 def getstat(device):
     lststats=[]
