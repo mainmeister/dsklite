@@ -181,13 +181,15 @@ from PIL import Image, ImageDraw, ImageColor
 STATSFILE = '/proc/diskstats'
 BLINKRATE = 0.065
 DEVICENAME = 2
-DEVICE = 'SDA'
+DEVICE = 'sda'
 IOINPROGRESS = 11
 ICONWIDTH = 32
 ICONHEIGHT = 32
 
 def resetled():
     icon.icon = iconoff
+    icon.visible = True
+    print 'OFF'
 
 def setled():
     global timer
@@ -197,6 +199,8 @@ def setled():
     timer = threading.Timer(BLINKRATE, resetled)
     timer.start()
     icon.icon = iconon
+    icon.visible = True
+    print 'ON'
 
 def getstat(device):
     lststats=[]
@@ -215,10 +219,14 @@ def getioinprogress(device):
 
 def image_on():
     image = Image.new('RGB', (ICONWIDTH, ICONHEIGHT), "#FF0000")
+    dc = ImageDraw.Draw(image)
+    dc.arc(xy = [(0,0), (ICONWIDTH-2,ICONHEIGHT-2)], start = 0, end = 360, fill = "#FF0000")
     return image
 
 def image_off():
     image = Image.new('RGB', (ICONWIDTH, ICONHEIGHT), "#000000")
+    dc = ImageDraw.Draw(image)
+    dc.arc(xy = [(0,0), (ICONWIDTH-2,ICONHEIGHT-2)], start = 0, end = 360, fill = "#000000")
     return image
 
 def startup(myicon):
@@ -234,4 +242,8 @@ if __name__ == '__main__':
     icon = pystray.Icon('dsklite')
     iconon = image_on()
     iconoff = image_off()
+    icon.icon = iconoff
+    icon.visible = True
+    icon.title = "Disk Activity"
     icon.run(startup)
+    #icon.run()
