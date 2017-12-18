@@ -8,4 +8,5 @@ Must run as root to be able to write to the /sys/devices/platform/i8042/serio0/i
 Reads the drive's "I/Os currently in progress" from the /proc/diskstats pseudo file.
 
 Uses the threading module to schedule reads. This allows a very efficient design.
- 
+
+** version 2 - use inotify to monitor changes to the statsfile file instead of polling
