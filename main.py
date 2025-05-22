@@ -78,6 +78,7 @@ NOTE: MUST be root
 import threading
 import time
 import os
+import sys
 
 STATSFILE = '/proc/diskstats'
 LEDFILE = '/sys/devices/platform/i8042/serio0/input/input3/input3::numlock/brightness'
@@ -88,40 +89,97 @@ LEDON = '1'
 LEDOFF = '0'
 DEVICE = "sda"
 
+timer = None  # Initialize timer to None
+
 def resetled():
-    open(LEDFILE, 'a').write(LEDOFF)
+    try:
+        with open(LEDFILE, 'w') as f:
+            f.write(LEDOFF)
+    except (IOError, OSError) as e:
+        # Log error if LEDFILE cannot be written.
+        # Continue execution as the main loop will retry LED operations.
+        # This assumes the issue might be transient (e.g., permissions temporarily changed).
+        sys.stderr.write(f"Error writing to LEDFILE '{LEDFILE}' in resetled: {e}\n")
 
 def setled():
     global timer
-    if 'timer' in globals():
-        if timer.is_alive:
-            timer.cancel()
-    timer = threading.Timer(BLINKRATE, resetled)
-    timer.start()
-    open(LEDFILE, 'a').write(LEDON)
+    # Cancel any existing timer to ensure the LED-off action is correctly timed
+    # from this 'setled' call.
+    if timer is not None and timer.is_alive():
+        timer.cancel()
+    
+    try:
+        # Start a timer to call resetled, which will turn the LED off after BLINKRATE.
+        timer = threading.Timer(BLINKRATE, resetled)
+        timer.start()
+    except Exception as e: # Broad exception for timer start issues
+        # Log error if the timer cannot be started.
+        # This might mean the LED blinking behavior is compromised.
+        # Continue execution, as disk activity monitoring is still valuable.
+        sys.stderr.write(f"Error starting timer in setled: {e}\n")
+        # Potentially attempt to re-initialize or handle, for now, just log
+
+    try:
+        # Turn the LED on.
+        with open(LEDFILE, 'w') as f: # Changed 'a' to 'w' for overwriting
+            f.write(LEDON)
+    except (IOError, OSError) as e:
+        # Log error if LEDFILE cannot be written.
+        # Continue execution as the main loop will retry LED operations on next activity.
+        sys.stderr.write(f"Error writing to LEDFILE '{LEDFILE}' in setled: {e}\n")
 
 def getstat(device):
-    lststats=[]
-    stats = open(STATSFILE).readlines()
-    for stat in stats:
-        lstat = stat.split()
-        if lstat[DEVICENAME] == device:
-            return lstat
-    return None
+    try:
+        with open(STATSFILE, 'r') as f:
+            stats = f.readlines()
+        for stat_line in stats: # Renamed stat to stat_line to avoid conflict
+            lstat = stat_line.split()
+            # Check if the line is long enough and matches the target device.
+            if len(lstat) > DEVICENAME and lstat[DEVICENAME] == device:
+                return lstat
+    except (IOError, OSError) as e:
+        # Log error if STATSFILE cannot be read. This is a non-critical error for a single read attempt.
+        # Recovery: Return None, getioinprogress will then return 0, indicating no activity.
+        # The main loop will continue and retry reading on the next iteration.
+        sys.stderr.write(f"Error reading STATSFILE '{STATSFILE}': {e}\n")
+    return None # Return None on error or if device not found
 
 def getioinprogress(device):
-    stat = getstat(device)
-    if stat:
-        return int(stat[IOINPROGRESS])
+    stat_data = getstat(device) # Renamed stat to stat_data
+    if stat_data and len(stat_data) > IOINPROGRESS:
+        try:
+            return int(stat_data[IOINPROGRESS])
+        except ValueError as e:
+            # Log error if the I/O progress value is not a valid integer.
+            # Recovery: Return 0, treating malformed data as no current I/O activity.
+            # This prevents the application from crashing due to unexpected file content.
+            sys.stderr.write(f"Error converting IOINPROGRESS to int for device '{device}': {e}\nData: {stat_data}\n")
+            return 0
+    # If stat_data is None (due to read error in getstat) or not structured as expected,
+    # or if IOINPROGRESS index is out of bounds.
+    # Recovery: Return 0, indicating no I/O activity detected or data unavailable.
+    # This is a safe default, as it implies no need to blink the LED.
     return 0
 
 if __name__ == '__main__':
-    pid = os.fork()
-    if pid == 0:
-        resetled()
+    try:
+        # Fork the process to run the LED monitoring in the background (child process).
+        pid = os.fork()
+    except OSError as e:
+        # Forking is essential for the daemon-like behavior of this script.
+        # If fork fails, the script cannot run as intended (e.g., detaching from terminal).
+        # Recovery: Log a critical error and exit, as the core functionality is impaired.
+        sys.stderr.write(f"Error: Failed to fork process: {e}\n")
+        sys.exit(1) # Exit if fork fails
+
+    if pid == 0:  # Child process
+        # Ensure the LED is in a known off state when the child process starts.
+        resetled() # Ensure LED is off at start
         while True:
             weightedtime = getioinprogress(DEVICE)
-            #print weightedtime
             if weightedtime > 0:
                 setled()
+            # No need for an else to call resetled() here, as setled() schedules resetled() via timer
             time.sleep(BLINKRATE / 4.0)
+    else: # Parent process
+        sys.exit(0) # Parent exits immediately

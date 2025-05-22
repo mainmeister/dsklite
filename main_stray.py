@@ -177,6 +177,7 @@ import threading
 import time
 import pystray
 from PIL import Image, ImageDraw, ImageColor
+import sys
 
 STATSFILE = '/proc/diskstats'
 BLINKRATE = 0.065
@@ -186,64 +187,176 @@ IOINPROGRESS = 11
 ICONWIDTH = 32
 ICONHEIGHT = 32
 
-def resetled():
-    icon.icon = iconoff
-    icon.visible = True
-    print 'OFF'
+timer = None # Initialize timer globally
+icon = None # Initialize icon globally, will be set in main
+iconon_img = None # Global for the 'on' image
+iconoff_img = None # Global for the 'off' image
 
-def setled():
-    global timer
-    if 'timer' in globals():
-        if timer.is_alive:
-            timer.cancel()
-    timer = threading.Timer(BLINKRATE, resetled)
-    timer.start()
-    icon.icon = iconon
-    icon.visible = True
-    print 'ON'
+def resetled_icon_state():
+    global icon, iconoff_img
+    if icon and iconoff_img:
+        try:
+            icon.icon = iconoff_img
+            icon.visible = True
+            # print 'OFF' # Optional: for debugging
+        except Exception as e:
+            # Log error if updating the pystray icon fails during runtime.
+            # Recovery: Continue execution. The icon might be stale, but the monitoring loop proceeds.
+            # This prevents a runtime glitch in UI update from crashing the whole application.
+            sys.stderr.write(f"Error updating icon to OFF state: {e}\n")
+    elif not icon:
+        # This case should ideally not be reached if icon is initialized properly in startup_routine.
+        sys.stderr.write("Error: resetled_icon_state called before icon was initialized.\n")
+    elif not iconoff_img:
+        # This case indicates an issue with image creation at startup.
+        sys.stderr.write("Error: resetled_icon_state called before iconoff_img was created.\n")
+
+
+def setled_icon_state():
+    global timer, icon, iconon_img
+    # Cancel any existing timer to ensure the icon-off action is correctly timed
+    # from this 'setled_icon_state' call.
+    if timer is not None and timer.is_alive():
+        timer.cancel()
+    
+    try:
+        # Start a timer to call resetled_icon_state, which will set the icon to 'off' after BLINKRATE.
+        timer = threading.Timer(BLINKRATE, resetled_icon_state)
+        timer.start()
+    except Exception as e:
+        # Log error if the timer cannot be started.
+        # This compromises the blinking behavior (icon might stay 'on').
+        # Recovery: Continue execution. Disk activity monitoring is still valuable.
+        sys.stderr.write(f"Error starting timer in setled_icon_state: {e}\n")
+
+    if icon and iconon_img:
+        try:
+            # Set the icon to 'on' state.
+            icon.icon = iconon_img
+            icon.visible = True
+            # print 'ON' # Optional: for debugging
+        except Exception as e:
+            # Log error if updating the pystray icon fails during runtime.
+            # Recovery: Continue execution. The icon might not update to 'on', but the monitoring loop proceeds.
+            sys.stderr.write(f"Error updating icon to ON state: {e}\n")
+    elif not icon:
+        # This case should ideally not be reached.
+        sys.stderr.write("Error: setled_icon_state called before icon was initialized.\n")
+    elif not iconon_img:
+        # This case indicates an issue with image creation at startup.
+        sys.stderr.write("Error: setled_icon_state called before iconon_img was created.\n")
+
 
 def getstat(device):
-    lststats=[]
-    stats = open(STATSFILE).readlines()
-    for stat in stats:
-        lstat = stat.split()
-        if lstat[DEVICENAME] == device:
-            return lstat
-    return None
+    try:
+        with open(STATSFILE, 'r') as f:
+            stats = f.readlines()
+        for stat_line in stats:
+            lstat = stat_line.split()
+            # Check if the line is long enough and matches the target device.
+            if len(lstat) > DEVICENAME and lstat[DEVICENAME] == device:
+                return lstat
+    except (IOError, OSError) as e:
+        # Log error if STATSFILE cannot be read. This is a non-critical error for a single read attempt.
+        # Recovery: Return None. getioinprogress will then return 0, indicating no activity.
+        # The main loop will continue and retry reading on the next iteration.
+        sys.stderr.write(f"Error reading STATSFILE '{STATSFILE}': {e}\n")
+    except Exception as e: # Catch any other unexpected errors
+        # Log unexpected errors during file processing.
+        # Recovery: Return None, similar to IOError/OSError.
+        sys.stderr.write(f"Unexpected error reading STATSFILE '{STATSFILE}': {e}\n")
+    return None # Return None on error or if device not found
 
 def getioinprogress(device):
-    stat = getstat(device)
-    if stat:
-        return int(stat[IOINPROGRESS])
+    stat_data = getstat(device)
+    if stat_data:
+        if len(stat_data) > IOINPROGRESS:
+            try:
+                return int(stat_data[IOINPROGRESS])
+            except ValueError as e:
+                # Log error if the I/O progress value is not a valid integer.
+                # Recovery: Return 0. Treating malformed data as no current I/O activity
+                # is a safe default, preventing crashes and implying no icon change.
+                sys.stderr.write(f"Error converting IOINPROGRESS to int for device '{device}': {e}\nData: {stat_data}\n")
+        else:
+            # Log if the expected field is missing.
+            # Recovery: Return 0, as data is incomplete.
+            sys.stderr.write(f"IOINPROGRESS index out of bounds for device '{device}'. Data: {stat_data}\n")
+    # If stat_data is None (due to read error in getstat) or not structured as expected.
+    # Recovery: Return 0. This is a safe default, indicating no I/O activity detected or data unavailable,
+    # thus no need to change the icon state to 'on'.
     return 0
 
-def image_on():
-    image = Image.new('RGB', (ICONWIDTH, ICONHEIGHT), "#FF0000")
-    dc = ImageDraw.Draw(image)
-    dc.arc(xy = [(0,0), (ICONWIDTH-2,ICONHEIGHT-2)], start = 0, end = 360, fill = "#FF0000")
-    return image
+def create_image(color_hex):
+    try:
+        # Create a simple solid color image for the system tray icon.
+        image = Image.new('RGB', (ICONWIDTH, ICONHEIGHT), color_hex)
+        # Drawing an arc was an option, but a solid block is simpler and less prone to PIL issues.
+        # dc = ImageDraw.Draw(image)
+        # dc.arc(xy = [(0,0), (ICONWIDTH-2,ICONHEIGHT-2)], start = 0, end = 360, fill = color_hex)
+        return image
+    except Exception as e:
+        # Log error if PIL/Pillow fails to create an image.
+        # This is critical for the application's UI.
+        # Recovery: Return None. The caller must handle this, usually by exiting at startup
+        # or logging and attempting to continue if it's a non-critical runtime image update.
+        sys.stderr.write(f"Error creating image with color {color_hex}: {e}\n")
+        return None
 
-def image_off():
-    image = Image.new('RGB', (ICONWIDTH, ICONHEIGHT), "#000000")
-    dc = ImageDraw.Draw(image)
-    dc.arc(xy = [(0,0), (ICONWIDTH-2,ICONHEIGHT-2)], start = 0, end = 360, fill = "#000000")
-    return image
-
-def startup(myicon):
-    resetled()
+def startup_routine(passed_icon): # pystray run() passes the icon as an argument
+    # This function runs in a separate thread after the pystray icon is set up.
+    global icon # Ensure we are using the global icon variable
+    icon = passed_icon # Assign the passed icon to our global var for other functions to use
+    
+    resetled_icon_state() # Set initial state
     while True:
         weightedtime = getioinprogress(DEVICE)
-        #print weightedtime
         if weightedtime > 0:
-            setled()
+            setled_icon_state()
+        # If weightedtime is 0, the timer from the last setled_icon_state() will call resetled_icon_state()
         time.sleep(BLINKRATE / 4.0)
 
 if __name__ == '__main__':
-    icon = pystray.Icon('dsklite')
-    iconon = image_on()
-    iconoff = image_off()
-    icon.icon = iconoff
-    icon.visible = True
-    icon.title = "Disk Activity"
-    icon.run(startup)
-    #icon.run()
+    # Create images first
+    # Create images for 'on' and 'off' states at startup.
+    iconon_img = create_image("#FF0000") # Red for ON
+    iconoff_img = create_image("#000000") # Black for OFF (or a dim color)
+
+    # PIL/Pillow image creation is essential for the system tray icon.
+    # If images cannot be created, the application cannot display its state.
+    # Recovery: Log a critical error and exit, as the application is not viable without icons.
+    if iconon_img is None or iconoff_img is None:
+        sys.stderr.write("Critical error: Failed to create initial icon images. Exiting.\n")
+        sys.exit(1)
+
+    try:
+        # Initialize the pystray.Icon object. This is a core part of the application's UI.
+        # Use a temporary variable for the icon passed to run, then assign to global in startup_routine.
+        temp_icon = pystray.Icon(
+            'dsklite',
+            iconoff_img, # Initial icon state is 'off'.
+            "Disk Activity"
+        )
+    except Exception as e:
+        # Failure to create the pystray.Icon object is a critical startup error.
+        # The application cannot function without the system tray icon.
+        # Recovery: Log a critical error and exit.
+        sys.stderr.write(f"Critical error: Failed to create pystray.Icon: {e}\n")
+        sys.exit(1)
+    
+    try:
+        # icon.run() is blocking and starts the system tray icon's event loop.
+        # The 'setup' argument runs 'startup_routine' in a new thread.
+        # This is the main entry point for the application's active monitoring.
+        temp_icon.run(setup=startup_routine)
+    except Exception as e:
+        # If icon.run() itself fails (e.g., issues with the underlying OS tray mechanism),
+        # the application cannot operate.
+        # Recovery: Log a critical error and exit. Attempt to stop the icon if it was partially started.
+        sys.stderr.write(f"Critical error: Failed during icon.run(): {e}\n")
+        try:
+            temp_icon.stop()
+        except:
+            # If stopping also fails, there's little more to do.
+            pass # Ignore errors during stop attempt after a run failure
+        sys.exit(1)
